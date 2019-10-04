@@ -2,11 +2,13 @@
 """Ways of dealing with macro-expanded code, e.g. caching or
 re-serializing it."""
 
-import imp
 import logging
 import marshal
 import os
 import shutil
+import importlib
+import importlib._bootstrap_external
+from py_compile import PycInvalidationMode, _get_default_invalidation_mode
 
 from . import unparse
 
@@ -58,24 +60,32 @@ class SaveExporter(object):
         pass
 
 
-suffix = __debug__ and 'c' or 'o'
-
+def _get_default_invalidation_mode():
+    if os.environ.get('SOURCE_DATE_EPOCH'):
+        return PycInvalidationMode.CHECKED_HASH
+    else:
+        return PycInvalidationMode.TIMESTAMP
 
 class PycExporter(object):
     def __init__(self, root=os.getcwd()):
         self.root = root
 
     def export_transformed(self, code, tree, module_name, file_name):
-        """TODO: this needs to be updated, look into py_compile.compile, the
-        following code was copied verbatim from there on python2"""
-        f = open(file_name + suffix , 'wb')
-        f.write('\0\0\0\0')
-        timestamp = long(os.fstat(f.fileno()).st_mtime)
-        wr_long(f, timestamp)
-        marshal.dump(code, f)
-        f.flush()
-        f.seek(0, 0)
-        f.write(imp.get_magic())
+        invalidation_mode = _get_default_invalidation_mode()
+        cfile = importlib.util.cache_from_source(file_name)
+        if invalidation_mode == PycInvalidationMode.TIMESTAMP:
+            stat = os.stat(file_name)
+            bytecode = importlib._bootstrap_external._code_to_timestamp_pyc(
+                code, int(stat.st_mtime), stat.st_size)
+        else:
+            source_hash = importlib.util.source_hash(source_bytes)
+            bytecode = importlib._bootstrap_external._code_to_hash_pyc(
+                code,
+                source_hash,
+                (invalidation_mode == PycInvalidationMode.CHECKED_HASH),
+            )
+        mode = importlib._bootstrap_external._calc_mode(file_name)
+        importlib._bootstrap_external._write_atomic(cfile, bytecode, mode)
 
     def find(self, file_path, pathname, description, module_name, package_path):
         try:
